@@ -1,6 +1,7 @@
 import {Plugin, Command, Notice, Editor, MarkdownView, MarkdownFileInfo, MarkdownPostProcessorContext} from "obsidian";
 
 import * as pdfjs from "pdfjs-dist";
+// @ts-ignore
 import * as worker from "pdfjs-dist/build/pdf.worker.entry.js";
 import {NotabilityDocument} from "./utils/NotabilityDocument";
 
@@ -121,6 +122,7 @@ export default class Main extends Plugin {
 							viewport: viewport,
 						};
 						console.log("Rendering page " + pageNumber);
+						//@ts-ignore
 						page.render(renderContext);
 					}
 				} catch (error) {
