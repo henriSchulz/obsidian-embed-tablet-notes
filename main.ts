@@ -1,134 +1,197 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import {Plugin, Command, Notice, Editor, MarkdownView, MarkdownFileInfo, MarkdownPostProcessorContext} from "obsidian";
 
-// Remember to rename these classes and interfaces!
+import * as pdfjs from "pdfjs-dist";
+import * as worker from "pdfjs-dist/build/pdf.worker.entry.js";
+import {NotabilityDocument} from "./utils/NotabilityDocument";
 
-interface MyPluginSettings {
-	mySetting: string;
+import axios from "axios";
+
+interface PdfNodeParameters {
+	range: Array<number>;
+	url: string;
+	link: boolean;
+	page: number | Array<number | Array<number>>;
+	scale: number;
+	fit: boolean,
+	rotation: number;
+	rect: Array<number>;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
+export default class Main extends Plugin {
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
 
-	async onload() {
-		await this.loadSettings();
+	onload() {
+		const item = this.addStatusBarItem().createSpan("hello-world-span");
+		item.setText("Hello, world!");
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+		this.registerMarkdownCodeBlockProcessor("notability", this.notabilityCodeBlockProcessor.bind(this));
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+	}
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
+	private async notabilityCodeBlockProcessor(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) {
+		const input = source.trim();
+
+		try {
+			const notabilityParams = JSON.parse(input) as {
+				id?: string,
+				name?: string
 			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
+
+			if(!notabilityParams.id){
+				el.createSpan({text: "Enter a valid Notability Document ID"});
+				return;
 			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
+
+			if(!notabilityParams.name){
+				el.createSpan({text: "Enter a valid Notability Document Name"});
+			}
+
+			const doc = new NotabilityDocument(notabilityParams.id, notabilityParams.name);
+
+			pdfjs.GlobalWorkerOptions.workerSrc = worker;
+
+			const arrayBuffer = await doc.getPdfBuffer();
+
+			let parameters: PdfNodeParameters | null = null;
+			try {
+				parameters = this.readParameters(source);
+			} catch (e) {
+				el.createEl("h2", {text: "PDF Parameters invalid: " + e.message});
+			}
+
+			if (parameters !== null) {
+				try {
+					const buffer = Buffer.from(arrayBuffer);
+					console.log("Buffer downloaded [x]")
+					const document = await pdfjs.getDocument(buffer).promise;
+
+
+					if ((<number[]>parameters.page).includes(0)) {
+						var pagesArray = [];
+						for (var i = 1; i <= document.numPages; i++) {
+							pagesArray.push(i);
+						}
+						parameters.page = pagesArray;
 					}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+					//Read pages
+					for (const pageNumber of <number[]>parameters.page) {
+						const page = await document.getPage(pageNumber);
+						let host = el;
+
+						// Get Viewport
+						const offsetX = Math.floor(
+							parameters.rect[0] * -1 * parameters.scale
+						);
+						const offsetY = Math.floor(
+							parameters.rect[1] * -1 * parameters.scale
+						);
+
+						// Render Canvas
+						const canvas = host.createEl("canvas");
+						canvas.onclick = () => {
+							window.open(doc.getNoteUrl());
+						}
+						if (parameters.fit) {
+							canvas.style.width = "100%";
+						}
+
+						const context = canvas.getContext("2d");
+
+						const baseViewportWidth = page.getViewport({scale: 1.0}).width;
+						const baseScale = canvas.clientWidth ? canvas.clientWidth / baseViewportWidth : 1;
+
+						const viewport = page.getViewport({
+							scale: baseScale * parameters.scale,
+							rotation: parameters.rotation,
+							offsetX: offsetX,
+							offsetY: offsetY,
+						});
+
+						if (parameters.rect[2] < 1) {
+							canvas.height = viewport.height;
+							canvas.width = viewport.width;
+						} else {
+							canvas.height = Math.floor(parameters.rect[2] * parameters.scale);
+							canvas.width = Math.floor(parameters.rect[3] * parameters.scale);
+						}
+
+						const renderContext = {
+							canvasContext: context,
+							viewport: viewport,
+						};
+						console.log("Rendering page " + pageNumber);
+						page.render(renderContext);
+					}
+				} catch (error) {
+					console.log(error)
+					el.createEl("h2", {text: error});
 				}
 			}
-		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
+		} catch (e) {
+			console.log(e);
+			el.createSpan({text: e});
+		}
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
-
-	onunload() {
 
 	}
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	private readParameters(jsonString: string) {
+
+
+		const parameters: PdfNodeParameters = JSON.parse(jsonString);
+
+		if (parameters.link === undefined) {
+			parameters.link = true;
+		}
+
+		if (parameters.range !== undefined) {
+			parameters.page = Array.from({length: parameters.range[1] - parameters.range[0] + 1}, (_, i) => parameters.range[0] + i);
+		}
+
+		if (typeof parameters.page === "number") {
+			parameters.page = [parameters.page];
+		}
+		if (parameters.page === undefined) {
+			parameters.page = [1];
+		}
+
+		for (let i = 0; i < parameters.page.length; i++) {
+			if (Array.isArray(parameters.page[i])) {
+				const range = parameters.page.splice(i, 1)[0] as Array<number>;
+				for (let j = range[0]; j <= range[1]; j++) {
+					parameters.page.splice(i, 0, j);
+					i += 1;
+				}
+			}
+		}
+
+		if (
+			parameters.scale === undefined ||
+			parameters.scale < 0.1 ||
+			parameters.scale > 10.0
+		) {
+			parameters.scale = 1.0;
+		}
+
+		if (parameters.fit === undefined) {
+			parameters.fit = true
+		}
+
+		if (parameters.rotation === undefined) {
+			parameters.rotation = 0;
+		}
+
+		if (parameters.rect === undefined) {
+			parameters.rect = [0, 0, 0, 0];
+		}
+		return parameters;
 	}
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
-}
