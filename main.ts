@@ -3,7 +3,6 @@ import {Plugin, Command, Notice, Editor, MarkdownView, MarkdownFileInfo, Markdow
 import * as pdfjs from "pdfjs-dist";
 // @ts-ignore
 import * as worker from "pdfjs-dist/build/pdf.worker.entry.js";
-import {NotabilityDocument} from "./utils/NotabilityDocument";
 
 import axios from "axios";
 
@@ -26,6 +25,7 @@ export default class Main extends Plugin {
 		item.setText("Hello, world!");
 
 		this.registerMarkdownCodeBlockProcessor("notability", this.notabilityCodeBlockProcessor.bind(this));
+		this.registerMarkdownCodeBlockProcessor("onenote", this.oneNoteCodeBlockProcessor.bind(this));
 
 	}
 
@@ -36,18 +36,48 @@ export default class Main extends Plugin {
 			const notabilityParams = JSON.parse(input) as {
 				id?: string,
 				name?: string
+				noteUrl?: string,
+				pdfUrl?: string
 			}
 
-			if(!notabilityParams.id){
+			// necessary  is at least the id or the noteUrl or the pdfUrl
+
+			if (!notabilityParams.id && !notabilityParams.noteUrl && !notabilityParams.pdfUrl) {
 				el.createSpan({text: "Enter a valid Notability Document ID"});
 				return;
 			}
 
-			if(!notabilityParams.name){
-				el.createSpan({text: "Enter a valid Notability Document Name"});
+			let doc: NotabilityDocument | null = null;
+
+
+			if (notabilityParams.noteUrl) {
+				doc = NotabilityDocument.fromNoteUrl(notabilityParams.noteUrl);
+				if (!doc) {
+					el.createSpan({text: "Invalid Note URL"});
+					return;
+				}
+				if (notabilityParams.name) {
+					doc.setDocumentName(notabilityParams.name);
+				}
 			}
 
-			const doc = new NotabilityDocument(notabilityParams.id, notabilityParams.name);
+			if (notabilityParams.pdfUrl) {
+				doc = NotabilityDocument.fromPdfUrl(notabilityParams.pdfUrl);
+				if (!doc) {
+					el.createSpan({text: "Invalid PDF URL"});
+					return;
+				}
+			}
+
+			if (notabilityParams.id) {
+				doc = new NotabilityDocument(notabilityParams.id, notabilityParams.name);
+			}
+
+			if (!doc) {
+				el.createSpan({text: "Invalid Notability Document: Enter a valid Notability Document ID, a Note URL or a PDF URL"});
+				return;
+			}
+
 
 			pdfjs.GlobalWorkerOptions.workerSrc = worker;
 
@@ -62,9 +92,8 @@ export default class Main extends Plugin {
 
 			if (parameters !== null) {
 				try {
-					const buffer = Buffer.from(arrayBuffer);
 					console.log("Buffer downloaded [x]")
-					const document = await pdfjs.getDocument(buffer).promise;
+					const document = await pdfjs.getDocument(arrayBuffer).promise;
 
 
 					if ((<number[]>parameters.page).includes(0)) {
@@ -91,7 +120,7 @@ export default class Main extends Plugin {
 						// Render Canvas
 						const canvas = host.createEl("canvas");
 						canvas.onclick = () => {
-							window.open(doc.getNoteUrl());
+							window.open(doc!.getNoteUrl());
 						}
 						if (parameters.fit) {
 							canvas.style.width = "100%";
@@ -137,6 +166,43 @@ export default class Main extends Plugin {
 			el.createSpan({text: e});
 		}
 
+
+	}
+
+	private async oneNoteCodeBlockProcessor(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) {
+		const input = source.trim();
+
+		try {
+			const oneNoteParams = JSON.parse(input) as {
+				url: string
+			}
+
+			if (!oneNoteParams.url) {
+				el.createSpan({text: "Enter a valid OneNote URL"});
+				return;
+			}
+
+			const iframe = el.createEl("iframe");
+			iframe.src = oneNoteParams.url;
+			iframe.setCssStyles({
+				width: "100%",
+				height: "100vh",
+			})
+			iframe.onclick = () => {
+				window.open(oneNoteParams.url);
+			}
+
+			if (iframe.contentWindow?.document.getElementById("Header")) {
+				const contentWindow = iframe.contentWindow;
+				const header = contentWindow.document.getElementById("Header");
+				header?.remove();
+			}
+
+
+		} catch (e) {
+			console.log(e);
+			el.createSpan({text: e});
+		}
 
 	}
 
@@ -192,6 +258,96 @@ export default class Main extends Plugin {
 		return parameters;
 	}
 
+
+}
+
+class NotabilityDocument {
+
+	private static NOTE_URL = "https://notability.com/n/"
+	private static PDF_URL = "https://notability.com/n/download/pdf/"
+	private static CLOUD_FUNCTION_URL = "https://us-central1-notability-scraper.cloudfunctions.net/pdf/" // /:id/:name
+
+
+	private readonly documentId: string;
+	private documentName: string | null = null
+
+	constructor(documentId: string, documentName?: string) {
+		this.documentId = documentId;
+
+		if (documentName) this.documentName = documentName;
+	}
+
+
+	async loadDocumentName(): Promise<{ exists: boolean }> {
+		const url = NotabilityDocument.CLOUD_FUNCTION_URL + this.documentId;
+		try {
+
+			const response = await axios.get(url);
+
+			if (response.status !== 200) {
+				return {exists: false}
+			}
+
+			const document = response.data.document as {
+				documentId: string,
+				documentName: string,
+				pdfDownloadUrl: string,
+				documentUrl: string
+			}
+
+			this.documentName = document.documentName;
+			return {exists: true};
+		} catch (e) {
+			console.log(e)
+			return {exists: false};
+		}
+	}
+
+	public getNoteUrl(): string {
+		return `${NotabilityDocument.NOTE_URL}${this.documentId}`;
+	}
+
+	public getPdfDownloadUrl(): string {
+		return `${NotabilityDocument.PDF_URL}${this.documentId}/${encodeURI(this.documentName ?? "")}.pdf`;
+	}
+
+	public static fromPdfUrl(pdfUrl: string): NotabilityDocument | null {
+		const split = pdfUrl.split("/");
+		if (split.length < 5) {
+			return null;
+		}
+		const documentId = split[4];
+		const documentName = split[5].replace(".pdf", "");
+		return new NotabilityDocument(documentId, documentName);
+	}
+
+
+	// document Name is not available in the pdf url
+	public static fromNoteUrl(noteUrl: string): NotabilityDocument | null {
+		const split = noteUrl.split("/");
+		if (split.length < 5) {
+			return null;
+		}
+		const documentId = split[4];
+		return new NotabilityDocument(documentId);
+	}
+
+	get id() {
+		return this.documentId;
+	}
+
+	public setDocumentName(name: string) {
+		this.documentName = name;
+	}
+
+	public async getPdfBuffer(): Promise<ArrayBuffer> {
+		//loads the document name if not already loaded in the cloud function
+		const url = `${NotabilityDocument.CLOUD_FUNCTION_URL}${this.documentId}/${encodeURI(this.documentName ?? "")}`
+		const res = await axios.get(url, {
+			responseType: 'arraybuffer'
+		});
+		return res.data;
+	}
 
 }
 
