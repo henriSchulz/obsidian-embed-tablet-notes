@@ -1,9 +1,7 @@
-import {Plugin, Command, Notice, Editor, MarkdownView, MarkdownFileInfo, MarkdownPostProcessorContext} from "obsidian";
+import {Command, MarkdownPostProcessorContext, Notice, Plugin} from "obsidian";
 
 import * as pdfjs from "pdfjs-dist";
 // @ts-ignore
-import * as worker from "pdfjs-dist/build/pdf.worker.entry.js";
-
 import axios from "axios";
 
 interface PdfNodeParameters {
@@ -21,12 +19,87 @@ export default class Main extends Plugin {
 
 
 	onload() {
-		const item = this.addStatusBarItem().createSpan("hello-world-span");
-		item.setText("Hello, world!");
 
+		pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.js`;
 		this.registerMarkdownCodeBlockProcessor("notability", this.notabilityCodeBlockProcessor.bind(this));
 		this.registerMarkdownCodeBlockProcessor("onenote", this.oneNoteCodeBlockProcessor.bind(this));
 
+
+		this.addCommand(this.createObsidianNotabilityCommand(
+			"Notability Document",
+			"add-notability-document"
+		))
+
+
+		const rangeX = [1, 20];
+		const rangeY = [1, 20];
+		const rangeAnchor = [1, 20];
+
+		//all combinations of anchor and area
+
+		for (let anchor = rangeAnchor[0]; anchor <= rangeAnchor[1]; anchor++) {
+			for (let x = rangeX[0]; x <= rangeX[1]; x++) {
+				for (let y = rangeY[0]; y <= rangeY[1]; y++) {
+					this.addCommand(this.createObsidianNotabilityCommandWithPReact(
+						`Notability Document ${anchor} (${x}x${y})`,
+						`add-notability-document-${anchor}-${x}-${y}`,
+						anchor,
+						[x, y]
+					))
+				}
+			}
+		}
+
+	}
+
+	private createObsidianNotabilityCommand(name: string, id: string, defaultRect?: number[]): Command {
+		return {
+			name,
+			id,
+			// hotkeys: [{modifiers: ["Meta", "Alt"], key: "n"}],
+			editorCallback: async (editor, ctx) => {
+				const url = editor.getSelection().trim()
+				try {
+					const doc = NotabilityDocument.fromNoteUrl(url)
+
+					if (!doc) {
+						return new Notice("Invalid Document URL")
+					}
+
+					if (defaultRect) {
+						const jsonTemplate = `\`\`\`notability\n{\n"id": "${doc.id}",\n"rect": [${defaultRect.toString()}]\n }\n\`\`\``
+
+
+						editor.replaceSelection(jsonTemplate)
+
+					} else {
+						const jsonTemplate = `\`\`\`notability\n{\n"id": "${doc.id}"\n }\n\`\`\``
+						editor.replaceSelection(jsonTemplate)
+					}
+				} catch (e) {
+					console.log(e)
+					new Notice("Invalid Document URL")
+				}
+
+
+			}
+		}
+	}
+
+
+	// anchor is between 1 and 20, area is the area of the document in the format [x, y] x and y in points (1p = 39,2px)
+
+	private createObsidianNotabilityCommandWithPReact(name: string, id: string, anchor: number, area: [x: number, y: number]): Command {
+
+		const P = 44.5;
+
+		const anchorX = 62.5
+
+		const anchorY = 83.5 + (anchor - 1) * P;
+
+		const rect = [anchorX, anchorY, (area[0] - 1) * P, (area[1] - 1) * P]
+
+		return this.createObsidianNotabilityCommand(name, id, rect);
 	}
 
 	private async notabilityCodeBlockProcessor(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) {
@@ -37,7 +110,8 @@ export default class Main extends Plugin {
 				id?: string,
 				name?: string
 				noteUrl?: string,
-				pdfUrl?: string
+				pdfUrl?: string,
+				pRect?: [anchor: number, w: number, h: number]
 			}
 
 			// necessary  is at least the id or the noteUrl or the pdfUrl
@@ -79,8 +153,6 @@ export default class Main extends Plugin {
 			}
 
 
-			pdfjs.GlobalWorkerOptions.workerSrc = worker;
-
 			const arrayBuffer = await doc.getPdfBuffer();
 
 			let parameters: PdfNodeParameters | null = null;
@@ -90,9 +162,40 @@ export default class Main extends Plugin {
 				el.createEl("h2", {text: "PDF Parameters invalid: " + e.message});
 			}
 
+
 			if (parameters !== null) {
+
+
+				if (notabilityParams.pRect) {
+
+					if(notabilityParams.pRect[0] < 1 || notabilityParams.pRect[0] > 20) {
+						el.createSpan({text: "Invalid Anchor"});
+						return;
+					}
+
+					if(notabilityParams.pRect[1] < 1 || notabilityParams.pRect[1] > 20) {
+						el.createSpan({text: "Invalid Width"});
+						return;
+					}
+
+					if(notabilityParams.pRect[2] < 1 || notabilityParams.pRect[2] > 20) {
+						el.createSpan({text: "Invalid Height"});
+						return;
+					}
+
+					const P = 44.5;
+
+					const anchorX = 62.5
+
+					const anchorY = 83.5 + (notabilityParams.pRect[0] - 1) * P;
+
+					parameters.rect = [anchorX, anchorY, (notabilityParams.pRect[1] - 1) * P, (notabilityParams.pRect[2] - 1) * P];
+				}
+
 				try {
-					console.log("Buffer downloaded [x]")
+
+
+					//@ts-ignore
 					const document = await pdfjs.getDocument(arrayBuffer).promise;
 
 
@@ -120,7 +223,7 @@ export default class Main extends Plugin {
 						// Render Canvas
 						const canvas = host.createEl("canvas");
 						canvas.onclick = () => {
-							window.open(doc!.getNoteUrl());
+							window.open(`${doc!.getPdfDownloadUrl()}#page=${parameters?.page}`);
 						}
 						if (parameters.fit) {
 							canvas.style.width = "100%";
@@ -241,7 +344,7 @@ export default class Main extends Plugin {
 			parameters.scale < 0.1 ||
 			parameters.scale > 10.0
 		) {
-			parameters.scale = 1.0;
+			parameters.scale = 5.0;
 		}
 
 		if (parameters.fit === undefined) {
@@ -259,14 +362,16 @@ export default class Main extends Plugin {
 	}
 
 
+
+
+
 }
 
 class NotabilityDocument {
 
 	private static NOTE_URL = "https://notability.com/n/"
 	private static PDF_URL = "https://notability.com/n/download/pdf/"
-	private static CLOUD_FUNCTION_URL = "https://us-central1-notability-scraper.cloudfunctions.net/pdf/" // /:id/:name
-
+	private static CLOUD_FUNCTION_URL_PDF = "https://us-central1-notability-scraper.cloudfunctions.net/pdf/" // /:id/:name
 
 	private readonly documentId: string;
 	private documentName: string | null = null
@@ -275,32 +380,6 @@ class NotabilityDocument {
 		this.documentId = documentId;
 
 		if (documentName) this.documentName = documentName;
-	}
-
-
-	async loadDocumentName(): Promise<{ exists: boolean }> {
-		const url = NotabilityDocument.CLOUD_FUNCTION_URL + this.documentId;
-		try {
-
-			const response = await axios.get(url);
-
-			if (response.status !== 200) {
-				return {exists: false}
-			}
-
-			const document = response.data.document as {
-				documentId: string,
-				documentName: string,
-				pdfDownloadUrl: string,
-				documentUrl: string
-			}
-
-			this.documentName = document.documentName;
-			return {exists: true};
-		} catch (e) {
-			console.log(e)
-			return {exists: false};
-		}
 	}
 
 	public getNoteUrl(): string {
@@ -336,13 +415,17 @@ class NotabilityDocument {
 		return this.documentId;
 	}
 
+	get name() {
+		return this.documentName
+	}
+
 	public setDocumentName(name: string) {
 		this.documentName = name;
 	}
 
 	public async getPdfBuffer(): Promise<ArrayBuffer> {
 		//loads the document name if not already loaded in the cloud function
-		const url = `${NotabilityDocument.CLOUD_FUNCTION_URL}${this.documentId}/${encodeURI(this.documentName ?? "")}`
+		const url = `${NotabilityDocument.CLOUD_FUNCTION_URL_PDF}${this.documentId}/${encodeURI(this.documentName ?? "")}`
 		const res = await axios.get(url, {
 			responseType: 'arraybuffer'
 		});

@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-notability-plugin",
-	"version": "1.0.0",
-	"description": "This plugin allows you to embed Notability notes into Obsidian.",
+	"name": "obsidian-embed-tablet-notes",
+	"version": "1.0.2",
+	"description": "This plugin allows you to embed Tablet notes into Obsidian.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
